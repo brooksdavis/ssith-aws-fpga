@@ -35,6 +35,7 @@ import AWS_Fabric_Defs  :: *;
 import AWS_AXI4_Deburster :: *;
 import AWS_AXI4_Connection :: *;
 import AXI_Mem_Controller :: *;
+import AXI4_Mem_Filter :: *;
 import AXI_RAM        :: *;
 
 `ifdef INCLUDE_TANDEM_VERIF
@@ -78,9 +79,23 @@ interface AWSP2;
 `endif
 endinterface
 
+typedef 2 IOFABRIC_NUM_MASTERS;
+
+`ifdef USE_BANK2_BRAM
+typedef 2 MEMFABRIC_NUM_SLAVES;
+typedef 1 MEMFABRIC_NUM_MASTERS;
+
+typedef 3 IOFABRIC_NUM_SLAVES;
+`else
+typedef 1 MEMFABRIC_NUM_SLAVES;
+typedef 2 MEMFABRIC_NUM_MASTERS;
+
+typedef 4 IOFABRIC_NUM_SLAVES;
+`define USE_MEM_FILTER
+`endif
 
 (* synthesize *)
-module mkIOFabric(AXI4_Fabric_IFC#(2, 3, 6, 64, 64, 0));
+module mkIOFabric(AXI4_Fabric_IFC#(IOFABRIC_NUM_MASTERS, IOFABRIC_NUM_SLAVES, 6, 64, 64, 0));
 
     let soc_map <- mkSoC_Map();
 
@@ -94,12 +109,17 @@ module mkIOFabric(AXI4_Fabric_IFC#(2, 3, 6, 64, 64, 0));
         else if ((`SOC_MAP_BASE(soc_map, uart16550_0_addr) <= addr) && (addr < `SOC_MAP_LIM(soc_map, uart16550_0_addr))) begin
            return tuple2(True, 1);
         end
+`ifdef USE_MEM_FILTER
+        else if ((`SOC_MAP_BASE(soc_map, mem_filter_0_addr) <= addr) && (addr < `SOC_MAP_LIM(soc_map, mem_filter_0_addr))) begin
+           return tuple2(True, 1);
+        end
+`endif
         else begin
            return tuple2(True, 2);
         end
    endfunction
 
-   AXI4_Fabric_IFC#(2, 3, 6, 64, 64, 0) axiFabric <- mkAXI4_Fabric(fn_addr_to_slave_num);
+   AXI4_Fabric_IFC#(IOFABRIC_NUM_MASTERS, IOFABRIC_NUM_SLAVES, 6, 64, 64, 0) axiFabric <- mkAXI4_Fabric(fn_addr_to_slave_num);
 
    method reset = axiFabric.reset;
    method set_verbosity = axiFabric.set_verbosity;
@@ -108,17 +128,20 @@ module mkIOFabric(AXI4_Fabric_IFC#(2, 3, 6, 64, 64, 0));
 endmodule
 
 (* synthesize *)
-module mkMemFabric(AXI4_Fabric_IFC#(1, 2, 6, 64, 512, 0));
+module mkMemFabric(AXI4_Fabric_IFC#(MEMFABRIC_NUM_MASTERS, MEMFABRIC_NUM_SLAVES, 6, 64, 512, 0));
    let soc_map <- mkSoC_Map();
-   function Tuple2 #(Bool, Bit #(1)) fn_mem_addr_to_slave_num(Bit #(64) addr);
+   function Tuple2 #(Bool, Bit #(TLog#(MEMFABRIC_NUM_SLAVES))) fn_mem_addr_to_slave_num(Bit #(64) addr);
       let min_mem_addr = min(`SOC_MAP_BASE(soc_map, ddr4_0_uncached_addr), `SOC_MAP_BASE(soc_map, ddr4_0_cached_addr));
       let uncached_mem_base = `SOC_MAP_BASE(soc_map, ddr4_0_uncached_addr) - min_mem_addr;
       let uncached_mem_lim = `SOC_MAP_LIM(soc_map, ddr4_0_uncached_addr) - min_mem_addr;
       // cached memory base has been subtracted from the address
+`ifdef USE_BANK2_BRAM
       if ((uncached_mem_base <= addr) && (addr < uncached_mem_lim)) begin
          return tuple2(True, 1);
       end
-      else begin
+      else
+`endif
+      begin
           return tuple2(True, 0);
       end
    endfunction
@@ -149,7 +172,7 @@ module mkAWSP2#(AWSP2_Response response)(AWSP2);
    Vector#(16, Reg#(Bit#(8)))    objIds <- replicateM(mkReg(0));
 
 
-   AXI4_Fabric_IFC#(2, 3, 6, 64, 64, 0) axiFabric <- mkIOFabric();
+   AXI4_Fabric_IFC#(IOFABRIC_NUM_MASTERS, IOFABRIC_NUM_SLAVES, 6, 64, 64, 0) axiFabric <- mkIOFabric();
    mkConnection(p2_core.master0, axiFabric.v_from_masters[0]);
    mkConnection(p2_core.master1, axiFabric.v_from_masters[1]);
    let to_slave0 = axiFabric.v_to_slaves[0];
@@ -159,17 +182,23 @@ module mkAWSP2#(AWSP2_Response response)(AWSP2);
    AXI4_Deburster_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) deburster <- mkDeburster();
    let memController <- mkAXI_Mem_Controller();
 
-   AXI4_Fabric_IFC#(1, 2, 6, 64, 512, 0) memFabric <- mkMemFabric();
+   AXI4_Fabric_IFC#(MEMFABRIC_NUM_MASTERS, MEMFABRIC_NUM_SLAVES, 6, 64, 512, 0) memFabric <- mkMemFabric();
    mkConnection(to_slave0, deburster.from_master);
    mkConnection(deburster.to_slave, memController.slave);
    let rawmem_xn <- mkConnection(memController.to_raw_mem, memFabric.v_from_masters[0]);
    let to_ddr = memFabric.v_to_slaves[0];
 
+`ifdef USE_BANK2_BRAM
    // BRAM
    let axiBRAM <- mkAXI_BRAM();
    mkConnection(memFabric.v_to_slaves[1], axiBRAM.portA);
-
    let from_dma_pcis = axiBRAM.portB;
+`else
+   let axiMemFilter <- mkAXI4_Mem_Filter();
+   mkConnection(axiFabric.v_to_slaves[3], axiMemFilter.from_control);
+   mkConnection(axiMemFilter.to_slave, memFabric.v_from_masters[1]);
+   let from_dma_pcis = axiMemFilter.from_master;
+`endif
 
 `ifndef BOARD_awsf1
     AXI4_Master_Xactor_IFC#(6, 64, 512, 0) dma_pcis_master_xactor <- mkAXI4_Master_Xactor();
