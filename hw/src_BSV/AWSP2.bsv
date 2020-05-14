@@ -90,8 +90,11 @@ typedef 3 IOFABRIC_NUM_SLAVES;
 typedef 1 MEMFABRIC_NUM_SLAVES;
 typedef 2 MEMFABRIC_NUM_MASTERS;
 
+`ifdef USE_MEM_FILTER
 typedef 4 IOFABRIC_NUM_SLAVES;
-`define USE_MEM_FILTER
+`else
+typedef 3 IOFABRIC_NUM_SLAVES;
+`endif // USE_MEM_FILTER
 `endif
 
 (* synthesize *)
@@ -194,10 +197,14 @@ module mkAWSP2#(AWSP2_Response response)(AWSP2);
    mkConnection(memFabric.v_to_slaves[1], axiBRAM.portA);
    let from_dma_pcis = axiBRAM.portB;
 `else
+`ifdef USE_MEM_FILTER
    let axiMemFilter <- mkAXI4_Mem_Filter();
    mkConnection(axiFabric.v_to_slaves[3], axiMemFilter.from_control);
    mkConnection(axiMemFilter.to_slave, memFabric.v_from_masters[1]);
    let from_dma_pcis = axiMemFilter.from_master;
+`else
+   let from_dma_pcis = memFabric.v_from_masters[1];
+`endif // USE_MEM_FILTER
 `endif
 
 `ifndef BOARD_awsf1
